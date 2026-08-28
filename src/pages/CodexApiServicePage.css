@@ -402,9 +402,8 @@
   color: var(--text-muted);
   font-size: 10.5px;
   line-height: 1.35;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .codex-api-service-grid {
@@ -1696,7 +1695,7 @@ html[data-reduced-motion="true"] .codex-api-service-key-advanced-toggle[aria-exp
 
 .codex-api-service-mapping-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) minmax(88px, 0.7fr) auto;
   gap: 8px;
   align-items: end;
   min-width: 0;

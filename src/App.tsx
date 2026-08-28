@@ -17,7 +17,11 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
 import { FileText, FolderOpen, RefreshCw, X } from 'lucide-react';
 import { SideNav } from './components/layout/SideNav';
+import { BootReadyMarker, VisibleBootPage } from './components/BootReadyMarker';
 import { GlobalModal } from './components/GlobalModal';
+import { WindowsOperationDialog } from './components/WindowsOperationDialog';
+import { CodexSwitchProgressModal } from './components/CodexSwitchProgressModal';
+import { CodexInstanceLaunchProgressModal } from './components/CodexInstanceLaunchProgressModal';
 import { AnnouncementHost } from './components/AnnouncementCenter';
 import { TopCenterPromoBanner } from './components/TopCenterPromoBanner';
 import type { QuickSettingsType } from './components/QuickSettingsPopover';
@@ -72,12 +76,17 @@ import {
 } from './utils/externalProviderImport';
 import { runAutoBackupCycle } from './services/scheduledBackupService';
 import {
+  hydrateUserMemory,
+  USER_MEMORY_FLAGS,
+} from './utils/userMemory';
+import {
   clearLegacyWorkbuddyAutoCheckinLogs,
   getWorkbuddyAutoCheckinConfig,
   migrateWorkbuddyAutoCheckinConfigAsync,
 } from './services/workbuddyAutoCheckinService';
 import { prepareCodexLocalAccessForRestart } from './services/codexLocalAccessService';
 import { applyReducedMotion } from './utils/reducedMotion';
+import { isCodexInstanceAccountConflict } from './utils/codexInstanceLaunchConflict';
 import {
   applyWebviewUiScale,
   isUiScaleResetKey,
@@ -769,6 +778,18 @@ function MainApp() {
   }, []);
 
   useEffect(() => {
+    void hydrateUserMemory().then((memory) => {
+      const store = useSideNavLayoutStore.getState();
+      if (
+        memory.dismissed[USER_MEMORY_FLAGS.classicSwitchPrompt] ||
+        store.hideClassicSwitchPrompt
+      ) {
+        store.setHideClassicSwitchPrompt(true);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
     try {
       const normalized = normalizeStoredActivePage(page);
       if (normalized) {
@@ -832,8 +853,6 @@ function MainApp() {
   const [appLaunchCandidates, setAppLaunchCandidates] = useState<AppLaunchCandidate[]>([]);
   const [appPathActionError, setAppPathActionError] = useState('');
   const [appPathScanError, setAppPathScanError] = useState('');
-  const [appPathCodexLaunchOnSwitch, setAppPathCodexLaunchOnSwitch] = useState(true);
-  const [appPathCodexLaunchSetting, setAppPathCodexLaunchSetting] = useState(false);
   const [versionJumpInfo, setVersionJumpInfo] = useState<{
     previous_version: string;
     current_version: string;
@@ -3198,8 +3217,6 @@ function MainApp() {
       setAppPathDetecting(false);
       setAppPathActionError('');
       setAppPathScanError('');
-      setAppPathCodexLaunchOnSwitch(true);
-      setAppPathCodexLaunchSetting(false);
       return () => {
         active = false;
       };
@@ -3243,7 +3260,9 @@ function MainApp() {
             appPathMissing.retry?.kind === 'instance' &&
             isClaudeWindowsAppLaunchTarget(normalizedPath);
           setAppPathDraft(shouldClearClaudeDefaultTarget ? '' : normalizedPath);
-          setAppPathCodexLaunchOnSwitch(config.codex_launch_on_switch ?? true);
+          if (appPathMissing.app === 'codex' && config.codex_launch_on_switch === false) {
+            setAppPathMissing(null);
+          }
         }
       } catch (error) {
         console.error('Failed to load app path config:', error);
@@ -3378,6 +3397,11 @@ function MainApp() {
       setAppPathMissing(null);
       setAppPathSetting(false);
     } catch (error) {
+      if (isCodexInstanceAccountConflict(error)) {
+        setAppPathMissing(null);
+        setAppPathSetting(false);
+        return;
+      }
       console.error('设置应用路径失败:', error);
       setAppPathActionError(String(error));
       setAppPathSetting(false);
@@ -3445,26 +3469,6 @@ function MainApp() {
       console.error('自动探测应用路径失败:', error);
     } finally {
       setAppPathDetecting(false);
-    }
-  };
-
-  const handleToggleCodexLaunchInMissingPath = async (enabled: boolean) => {
-    if (!appPathMissing || appPathMissing.app !== 'codex') return;
-    if (appPathSetting || appPathDetecting || appPathCodexLaunchSetting) return;
-    setAppPathCodexLaunchSetting(true);
-    setAppPathActionError('');
-    setAppPathScanError('');
-    try {
-      await invoke('set_codex_launch_on_switch', { enabled });
-      setAppPathCodexLaunchOnSwitch(enabled);
-      if (!enabled) {
-        setAppPathMissing(null);
-      }
-    } catch (error) {
-      console.error('更新 Codex 自动启动配置失败:', error);
-      setAppPathActionError(String(error));
-    } finally {
-      setAppPathCodexLaunchSetting(false);
     }
   };
 
@@ -3661,7 +3665,7 @@ function MainApp() {
                 ? t('quickSettings.trae.appPath', 'Trae 路径')
               : t('quickSettings.antigravity.appPath', '启动路径')
     : t('quickSettings.antigravity.appPath', '启动路径');
-  const appPathMissingBusy = appPathSetting || appPathDetecting || appPathCodexLaunchSetting;
+  const appPathMissingBusy = appPathSetting || appPathDetecting;
   const claudeMultiInstanceNeedsExe =
     appPathMissing?.app === 'claude' && appPathMissing.retry?.kind === 'instance';
   const shouldRenderUpdateNotification = showUpdateNotification
@@ -3710,6 +3714,9 @@ function MainApp() {
         </Suspense>
       )}
       <GlobalModal />
+      <CodexSwitchProgressModal />
+      <CodexInstanceLaunchProgressModal />
+      <WindowsOperationDialog />
 
       {/* 关闭确认对话框 */}
       {showCloseDialog && (
@@ -3758,32 +3765,15 @@ function MainApp() {
                     )}
                   </p>
                 ) : null}
-              </div>
-
-              {appPathMissing.app === 'codex' ? (
-                <div className="qs-section">
-                  <div className="qs-row">
-                    <div className="qs-row-label">
-                      {t('settings.general.codexLaunchOnSwitch', '切换 Codex 时自动启动 Codex App')}
-                    </div>
-                    <label className="qs-switch">
-                      <input
-                        type="checkbox"
-                        checked={appPathCodexLaunchOnSwitch}
-                        disabled={appPathMissingBusy}
-                        onChange={(e) => handleToggleCodexLaunchInMissingPath(e.target.checked)}
-                      />
-                      <span className="qs-switch-slider" />
-                    </label>
-                  </div>
+                {appPathMissing.app === 'codex' ? (
                   <p className="app-path-missing-hint">
                     {t(
                       'appPath.missing.codexLaunchHint',
-                      '关闭后仅执行切号与登录覆盖，不再尝试启动 Codex App，也不会再次要求设置启动路径。'
+                      '切号已完成。启动应用请先设置路径；若切号后不需要启动，请到设置中关闭「切换 Codex 时自动启动 Codex App」。',
                     )}
                   </p>
-                </div>
-              ) : null}
+                ) : null}
+              </div>
 
               <div className="qs-section">
                 <div className="qs-section-header">
@@ -3986,15 +3976,19 @@ function MainApp() {
         ) : null}
         {/* overview 现在是合并后的账号总览页面 */}
         <Suspense fallback={suspenseFallback}>
-          {page === 'dashboard' && (
+          <VisibleBootPage when={page === 'dashboard'}>
             <DashboardPage
               onNavigate={setPage}
               onOpenPlatformLayout={openPlatformLayoutModal}
               onEasterEggTriggerClick={handleBreakoutEntryTriggerClick}
             />
-          )}
-          {page === 'api-relay' && <ApiKeyFunPage />}
-          {page === 'overview' && <AccountsPage onNavigate={setPage} />}
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'api-relay'}>
+            <ApiKeyFunPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'overview'}>
+            <AccountsPage onNavigate={setPage} />
+          </VisibleBootPage>
           {/* Codex suite: keep both pages mounted after first visit to avoid empty flash when switching. */}
           {shouldMountCodexSuite && (
             <Suspense fallback={page === 'codex' ? suspenseFallback : null}>
@@ -4004,6 +3998,7 @@ function MainApp() {
                 aria-hidden={page !== 'codex'}
               >
                 <CodexAccountsPage />
+                {page === 'codex' ? <BootReadyMarker /> : null}
               </div>
             </Suspense>
           )}
@@ -4015,37 +4010,82 @@ function MainApp() {
                 aria-hidden={page !== 'codex-api-service'}
               >
                 <CodexApiServicePage />
+                {page === 'codex-api-service' ? <BootReadyMarker /> : null}
               </div>
             </Suspense>
           )}
-          {page === 'claude' && <ClaudeAccountsPage subPlatform="desktop" />}
-          {page === 'claude-cli' && <ClaudeAccountsPage subPlatform="cli" />}
-          {page === 'github-copilot' && <GitHubCopilotAccountsPage />}
-          {page === 'windsurf' && <WindsurfAccountsPage />}
-          {page === 'kiro' && <KiroAccountsPage />}
-          {page === 'cursor' && <CursorAccountsPage />}
-          {page === 'grok' && <GrokAccountsPage />}
-          {page === 'codebuddy' && <CodebuddyAccountsPage />}
-          {page === 'codebuddy-cn' && <CodebuddyCnAccountsPage />}
-          {page === 'qoder' && <QoderAccountsPage />}
-          {page === 'zcode' && <ZcodeAccountsPage />}
-          {page === 'trae' && <TraeAccountsPage platformId="trae" />}
-          {page === 'trae-solo' && <TraeAccountsPage platformId="trae_solo" />}
-          {page === 'trae-cn' && <TraeAccountsPage platformId="trae_cn" />}
-          {page === 'trae-solo-cn' && <TraeAccountsPage platformId="trae_solo_cn" />}
-          {page === 'workbuddy' && <WorkbuddyAccountsPage />}
-          {page === 'zed' && <ZedAccountsPage />}
-          {page === 'instances' && <InstancesPage onNavigate={setPage} />}
-          {page === 'wakeup' && <WakeupTasksPage onNavigate={setPage} />}
-          {page === 'verification' && <WakeupVerificationPage onNavigate={setPage} />}
-          {page === '2fa' && <TwoFactorAuthPage />}
-          {page === 'manual' && (
+          <VisibleBootPage when={page === 'claude'}>
+            <ClaudeAccountsPage subPlatform="desktop" />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'claude-cli'}>
+            <ClaudeAccountsPage subPlatform="cli" />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'github-copilot'}>
+            <GitHubCopilotAccountsPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'windsurf'}>
+            <WindsurfAccountsPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'kiro'}>
+            <KiroAccountsPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'cursor'}>
+            <CursorAccountsPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'grok'}>
+            <GrokAccountsPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'codebuddy'}>
+            <CodebuddyAccountsPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'codebuddy-cn'}>
+            <CodebuddyCnAccountsPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'qoder'}>
+            <QoderAccountsPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'zcode'}>
+            <ZcodeAccountsPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'trae'}>
+            <TraeAccountsPage platformId="trae" />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'trae-solo'}>
+            <TraeAccountsPage platformId="trae_solo" />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'trae-cn'}>
+            <TraeAccountsPage platformId="trae_cn" />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'trae-solo-cn'}>
+            <TraeAccountsPage platformId="trae_solo_cn" />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'workbuddy'}>
+            <WorkbuddyAccountsPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'zed'}>
+            <ZedAccountsPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'instances'}>
+            <InstancesPage onNavigate={setPage} />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'wakeup'}>
+            <WakeupTasksPage onNavigate={setPage} />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'verification'}>
+            <WakeupVerificationPage onNavigate={setPage} />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === '2fa'}>
+            <TwoFactorAuthPage />
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'manual'}>
             <ManualPage
               onNavigate={setPage}
               onOpenPlatformLayout={openPlatformLayoutModal}
             />
-          )}
-          {page === 'settings' && <SettingsPage />}
+          </VisibleBootPage>
+          <VisibleBootPage when={page === 'settings'}>
+            <SettingsPage />
+          </VisibleBootPage>
         </Suspense>
       </div>
     </div>
